@@ -1,0 +1,268 @@
+WITH
+
+ids AS
+-- Query the datatransfer_activity table for the activity_ids relevent to your client, these ids are referenced in the 'conversions' subquery, you can add as many ids here as you want
+(
+SELECT
+'3773601|POSTCLICK' AS id_1,
+'3773601|POSTVIEW' AS id_2
+
+),
+
+impressions AS (
+	SELECT
+		dated, campaign_id, site_id_dcm, placement_id, rendering_id, ad_id, dbm_line_item_id, 
+		COUNT(event_type) AS count_impressions,
+		SUM(TRY_CAST(dbm_bid_price_advertiser_currency AS DOUBLE)/1000000000) AS dbm_bid_price_advertiser_currency,
+		SUM(TRY_CAST(dbm_total_media_cost_advertiser_currency AS DOUBLE)/1000000000) AS dbm_revenue_advertiser_currency
+	FROM ralph_lauren_ftp_dcm_publicis_impressions
+	WHERE dated >= '2020-06-01'
+	AND dated <= {{yesterday}}
+	and regexp_like (site_id_dcm,'5859258|5628611|6126856')
+	GROUP BY 1,2,3,4,5,6,7
+),
+
+clicks AS
+
+(
+SELECT dated, campaign_id, site_id_dcm, placement_id, rendering_id, ad_id, dbm_line_item_id,
+COUNT(event_type) AS count_clicks
+FROM ralph_lauren_ftp_dcm_publicis_clicks
+	WHERE dated >= '2020-06-01'
+AND dated <= {{yesterday}}
+	and regexp_like (site_id_dcm,'5859258|5628611|6126856')
+GROUP BY 1,2,3,4,5,6,7
+),
+
+activity AS
+
+(
+SELECT dated, campaign_id, site_id_dcm, placement_id, rendering_id, ad_id, dbm_line_item_id, activity_id, event_sub_type, activity_id||'|'||event_sub_type AS ident,
+COUNT(event_type) AS convs, 
+SUM(CAST(IF(total_revenue = '','0',total_revenue) AS DOUBLE)*1000000 ) AS rev
+FROM ralph_lauren_ftp_dcm_publicis_activity
+	WHERE dated >= '2020-06-01'
+AND dated <= {{yesterday}}
+and activity_id like '3773601'
+	and regexp_like (site_id_dcm,'5859258|5628611|6126856')
+GROUP BY 1,2,3,4,5,6,7,8,9,10
+),
+
+arrayed AS
+
+(
+SELECT dated, campaign_id, site_id_dcm, placement_id, rendering_id, ad_id, dbm_line_item_id,
+ARRAY_AGG(ident) AS ident_array, 
+ARRAY_AGG(convs) AS convs_array,
+ARRAY_AGG(rev) AS rev_array,
+sum(convs) as convs,
+sum(rev)as rev
+FROM activity
+GROUP BY 1,2,3,4,5,6,7
+),
+
+conversions AS
+
+(
+SELECT dated, campaign_id, site_id_dcm, placement_id, rendering_id, ad_id, dbm_line_item_id,
+-- the following elements make use of the activity ids & event_sub_type strings defined in the ids subquery, you can add, subtract and amend the column aliases as required
+IF(array_position(ident_array,id_1) = 0, 0,
+CAST(element_at(convs_array, array_position(ident_array,id_1)) AS BIGINT)) AS id_1_conversions,
+IF(array_position(ident_array,id_2) = 0, 0,
+CAST(element_at(convs_array, array_position(ident_array,id_2)) AS BIGINT)) AS id_2_conversions,
+
+IF(array_position(ident_array,id_1) = 0, 0,
+CAST(element_at(rev_array, array_position(ident_array,id_1)) AS DOUBLE)) AS id_1_revenue,
+IF(array_position(ident_array,id_2) = 0, 0,
+CAST(element_at(rev_array, array_position(ident_array,id_2)) AS DOUBLE)) AS id_2_revenue,
+convs as total_conversions,
+rev as total_revenue
+
+FROM arrayed, ids
+),
+
+/*
+Match tables currently not available for Ralph
+
+cams AS
+(
+SELECT campaign_id, campaign
+FROM ralph_lauren_datatransfer_campaigns
+WHERE dated >= {{days_ago 365}}
+GROUP BY 1,2
+),
+
+placements_sites AS
+
+(
+SELECT placement_id, placement, site_id_dcm, site_keyname
+FROM ralph_lauren_datatransfer_placements
+WHERE dated >= {{days_ago 20}}
+GROUP BY 1,2,3,4
+),
+
+ads AS
+
+(
+SELECT ad_id, ad
+FROM ralph_lauren_datatransfer_ads
+WHERE dated >= {{days_ago 20}}
+GROUP BY 1,2
+),
+
+creatives AS
+
+(
+SELECT rendering_id, creative_id, creative, creative_pixel_size
+FROM ralph_lauren_datatransfer_creatives
+WHERE dated >= {{days_ago 20}}
+GROUP BY 1,2,3,4
+),*/
+
+base AS
+
+(
+SELECT
+COALESCE(impressions.dated,clicks.dated,conversions.dated) AS dated,
+COALESCE(impressions.campaign_id,clicks.campaign_id,conversions.campaign_id) AS campaign_id,
+COALESCE(impressions.site_id_dcm,clicks.site_id_dcm,conversions.site_id_dcm) AS site_id_dcm,
+COALESCE(impressions.placement_id,clicks.placement_id,conversions.placement_id) AS placement_id,
+COALESCE(impressions.rendering_id,clicks.rendering_id,conversions.rendering_id) AS rendering_id,
+COALESCE(impressions.ad_id,clicks.ad_id,conversions.ad_id) AS ad_id,
+COALESCE(impressions.dbm_line_item_id,clicks.dbm_line_item_id,conversions.dbm_line_item_id) AS dbm_line_item_id,
+COALESCE(impressions.count_impressions,0) AS impressions, 
+COALESCE(clicks.count_clicks,0) AS clicks,
+COALESCE(impressions.dbm_bid_price_advertiser_currency,0) AS dbm_bid_price_advertiser_currency,
+COALESCE(impressions.dbm_revenue_advertiser_currency,0) AS dbm_total_media_cost_advertiser_currency, 
+COALESCE(conversions.id_1_conversions,0) AS post_click_conversions_one,
+
+COALESCE(conversions.id_2_conversions,0) AS post_view_conversions_one,
+
+COALESCE(conversions.id_1_revenue,0) AS post_click_revenue_one,
+COALESCE(conversions.id_2_revenue,0) AS post_view_revenue_one,
+COALESCE(conversions.total_conversions,0) AS total_conversions,
+COALESCE(conversions.total_revenue,0) AS total_revenue
+
+FROM
+impressions
+FULL OUTER JOIN
+clicks
+ON (impressions.dated = clicks.dated AND impressions.campaign_id = clicks.campaign_id AND impressions.site_id_dcm = clicks.site_id_dcm AND
+impressions.placement_id = clicks.placement_id AND impressions.rendering_id = clicks.rendering_id AND impressions.ad_id = clicks.ad_id AND
+impressions.dbm_line_item_id = clicks.dbm_line_item_id)
+FULL OUTER JOIN
+conversions
+ON (impressions.dated = conversions.dated AND impressions.campaign_id = conversions.campaign_id AND impressions.site_id_dcm = conversions.site_id_dcm AND
+impressions.placement_id = conversions.placement_id AND impressions.rendering_id = conversions.rendering_id AND impressions.ad_id = conversions.ad_id AND
+impressions.dbm_line_item_id = conversions.dbm_line_item_id)
+),
+
+datatrans AS
+
+(
+SELECT base.dated, base.campaign_id, 
+--REGEXP_REPLACE(REGEXP_REPLACE(placements_sites.site_keyname,'N9009.\d+\.?',''),'\/.*','') AS site_keyname,
+base.site_id_dcm,
+--placements_sites.placement,
+base.placement_id, base.rendering_id,
+--creatives.creative_id, creatives.creative, creatives.creative_pixel_size,
+-- the following split part elements can be customised to suit your placements naming convention
+--SPLIT_PART(placements_sites.placement,' | ',10) AS creative_type,
+--SPLIT_PART(placements_sites.placement,' | ',4) AS category,
+--SPLIT_PART(placements_sites.placement,' | ',3) AS product,
+--SPLIT_PART(placements_sites.placement,' | ',1) AS client,
+--SPLIT_PART(placements_sites.placement,' | ',1) AS market,
+--SPLIT_PART(placements_sites.placement,' | ',9) AS device,
+--SPLIT_PART(placements_sites.placement,' | ',8) AS targeting,
+--SPLIT_PART(placements_sites.placement,' | ',7) AS strategy,
+--ads.ad,
+base.ad_id, base.dbm_line_item_id,
+base.impressions, base.clicks, base.dbm_bid_price_advertiser_currency, base.dbm_total_media_cost_advertiser_currency,
+base.post_click_conversions_one, base.post_view_conversions_one, 
+base.post_click_revenue_one, base.post_view_revenue_one,
+total_conversions, 
+total_revenue
+FROM
+base
+/*LEFT JOIN
+cams
+ON (base.campaign_id = cams.campaign_id)
+LEFT JOIN
+placements_sites
+ON (base.site_id_dcm = placements_sites.site_id_dcm AND base.placement_id = placements_sites.placement_id)
+LEFT  JOIN
+creatives
+ON (base.rendering_id = creatives.rendering_id)
+LEFT JOIN
+ads
+ON (base.ad_id = ads.ad_id)*/
+)
+
+
+-- Top Level Select
+SELECT 
+dated, 
+CASE
+when regexp_like (campaign_id,'23620876') then 'CH_Ralph Lauren_Retargeting_BAU_FY20_Display_'
+when regexp_like (campaign_id,'23640470') then 'DE_Ralph Lauren_Retargeting_BAU_FY20_Display_'
+when regexp_like (campaign_id,'24036034') then 'DE_Ralph Lauren_Retargeting_SS_FY21_Display_'
+when regexp_like (campaign_id,'23660432') then 'ES_Ralph Lauren_Retargeting_BAU_FY20_Display_'
+when regexp_like (campaign_id,'24036028') then 'ES_Ralph Lauren_Retargeting_SS_FY21_Display_'
+when regexp_like (campaign_id,'23660426') then 'FR_Ralph Lauren_Retargeting_BAU_FY20_Display_'
+when regexp_like (campaign_id,'24035722') then 'FR_Ralph Lauren_Retargeting_SS_FY21_Display_'
+when regexp_like (campaign_id,'23670474') then 'IE_Ralph Lauren_Retargeting_BAU_FY20_Display_'
+when regexp_like (campaign_id,'23670978') then 'IT_Ralph Lauren_Retargeting_BAU_FY20_Display_'
+when regexp_like (campaign_id,'24036613') then 'IT_Ralph Lauren_Retargeting_SS_FY21_Display_'
+when regexp_like (campaign_id,'23645508') then 'UK_Ralph Lauren_Retargeting_BAU_FY20_Display_'
+when regexp_like (campaign_id,'24036271') then 'UK_Ralph Lauren_Retargeting_SS_FY21_Display_'
+when regexp_like (campaign_id,'23244330') then 'All_Ralph Lauren_Retargeting_BAU_FY20_Display_'
+when regexp_like (campaign_id,'23620876') then 'CH_Ralph Lauren_Retargeting_BAU_FY20_Display_'
+when regexp_like (campaign_id,'23640470') then 'DE_Ralph Lauren_Retargeting_BAU_FY20_Display_'
+when regexp_like (campaign_id,'23660432') then 'ES_Ralph Lauren_Retargeting_BAU_FY20_Display_'
+when regexp_like (campaign_id,'23660426') then 'FR_Ralph Lauren_Retargeting_BAU_FY20_Display_'
+when regexp_like (campaign_id,'23670474') then 'IE_Ralph Lauren_Retargeting_BAU_FY20_Display_'
+when regexp_like (campaign_id,'23670978') then 'IT_Ralph Lauren_Retargeting_BAU_FY20_Display_'
+when regexp_like (campaign_id,'23645508') then 'UK_Ralph Lauren_Retargeting_BAU_FY20_Display_'
+when regexp_like (campaign_id,'24188484') then 'AT_Ralph Lauren_Prospecting_BAU_FY21_Social_'
+when regexp_like (campaign_id,'24190587') then 'AT_Ralph Lauren_Retargeting_BAU_FY21_Social_'
+when regexp_like (campaign_id,'24185147') then 'BE_Ralph Lauren_Prospecting_BAU_FY21_Social_'
+when regexp_like (campaign_id,'24190818') then 'BE_Ralph Lauren_Retargeting_BAU_FY21_Social_'
+when regexp_like (campaign_id,'24181745') then 'CH_Ralph Lauren_Prospecting_BAU_FY21_Social_'
+when regexp_like (campaign_id,'24190584') then 'CH_Ralph Lauren_Retargeting_BAU_FY21_Social_'
+when regexp_like (campaign_id,'24185396') then 'DE_Ralph Lauren_Prospecting_BAU_FY21_Social_'
+when regexp_like (campaign_id,'24182018') then 'DE_Ralph Lauren_Retargeting_BAU_FY21_Social_'
+when regexp_like (campaign_id,'24190812') then 'ES_Ralph Lauren_Retargeting_BAU_FY21_Social_'
+when regexp_like (campaign_id,'24190809') then 'FR_Ralph Lauren_Retargeting_BAU_FY21_Social_'
+when regexp_like (campaign_id,'24190596') then 'IE_Ralph Lauren_Prospecting_BAU_FY21_Social_'
+when regexp_like (campaign_id,'24192477') then 'IE_Ralph Lauren_Retargeting_BAU_FY21_Social_'
+when regexp_like (campaign_id,'24195357') then 'IT_Ralph Lauren_Prospecting_BAU_FY21_Social_'
+when regexp_like (campaign_id,'24182021') then 'IT_Ralph Lauren_Retargeting_BAU_FY21_Social_'
+when regexp_like (campaign_id,'24185794') then 'NL_Ralph Lauren_Prospecting_BAU_FY21_Social_'
+when regexp_like (campaign_id,'24182024') then 'NL_Ralph Lauren_Retargeting_BAU_FY21_Social_'
+when regexp_like (campaign_id,'24188499') then 'SE_Ralph Lauren_Prospecting_BAU_FY21_Social_'
+when regexp_like (campaign_id,'24189636') then 'SE_Ralph Lauren_Retargeting_BAU_FY21_Social_'
+when regexp_like (campaign_id,'24192753') then 'UK_Ralph Lauren_Prospecting_BAU_FY21_Social_'
+when regexp_like (campaign_id,'24188469') then 'UK_Ralph Lauren_Retargeting_BAU_FY21_Social_'
+
+END as campaign,
+campaign_id, 
+CASE when regexp_like (site_id_dcm,'5859258') then 'crimtan.com'
+when regexp_like (site_id_dcm,'5628611') then 'DBM ForwardPMX Global 71115484-Ralph Lauren - Euro'
+when regexp_like (site_id_dcm,'6126856') then 'facebook UK'
+END as site_id_dcm_name,
+site_id_dcm,
+placement_id,
+
+ad_id, 
+
+sum(impressions) as impressions,
+sum(clicks) as clicks,
+sum(post_click_conversions_one) as post_click_conversions_one,
+sum(post_view_conversions_one ) as post_view_conversions_one, 
+sum(post_click_revenue_one ) as post_click_revenue_one, 
+sum(post_view_revenue_one) as post_view_revenue_one,
+sum(total_conversions ) as total_conversions, 
+sum(total_revenue) as total_revenue
+
+FROM datatrans
+group by 1,2,3,4,5,6,7
